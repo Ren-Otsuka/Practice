@@ -73,7 +73,7 @@ h1 { font-size: 26px; line-height: 1.3; margin: 0; font-weight: 700; text-wrap: 
 }
 form { display: flex; flex-direction: column; gap: 16px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
-.field label { font-weight: 500; font-size: 14px; }
+.field > label, .field > .label { font-weight: 500; font-size: 14px; }
 .field .hint { color: var(--muted); font-size: 12px; }
 .input-wrap { display: flex; align-items: center; gap: 8px; }
 input {
@@ -88,11 +88,35 @@ input {
   padding: 10px 12px;
   min-height: 46px;
 }
-input[type="date"] { font-family: var(--font-body); }
+input[type="date"], input.item-name { font-family: var(--font-body); }
 .unit { color: var(--muted); font-size: 14px; white-space: nowrap; }
 input:focus-visible, button:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Itemised payments */
+.items { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.item { display: grid; grid-template-columns: 1fr 112px 44px; gap: 6px; align-items: center; }
+.item input { font-size: 16px; min-width: 0; }
+.item input.item-amount { text-align: right; }
+.item .remove {
+  min-height: 46px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--muted);
+}
+.item .remove:hover { color: var(--warn); border-color: var(--warn); }
+.items-empty { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+.items-empty[hidden] { display: none; }
+.items-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
+.items-total { font-size: 13px; color: var(--muted); }
+.items-total b { font-family: var(--font-num); color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+button.add {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 500;
 }
 
 .sample-note {
@@ -203,12 +227,14 @@ button:hover { border-color: var(--accent); }
         <input id="payday" type="date">
       </div>
       <div class="field">
-        <label for="fixed">給料日までに引き落とされる固定費</label>
-        <div class="input-wrap">
-          <input id="fixed" type="number" inputmode="numeric" min="0" step="1">
-          <span class="unit">円</span>
+        <span class="label" id="items-label">給料日までの支払い予定</span>
+        <span class="hint">家賃、スマホ代、カード引き落としなど。項目ごとに分けて入れられます。</span>
+        <ul id="items" class="items" aria-labelledby="items-label"></ul>
+        <p id="items-empty" class="items-empty" hidden>項目はありません。支払い予定があれば追加してください。</p>
+        <div class="items-foot">
+          <button type="button" id="add" class="add">＋ 項目を追加</button>
+          <span class="items-total">合計 <b id="items-total">0円</b></span>
         </div>
-        <span class="hint">家賃、スマホ代など。合計を入れてください。</span>
       </div>
       <div class="field">
         <label for="saving">残しておきたい額</label>
@@ -229,7 +255,7 @@ button:hover { border-color: var(--accent); }
       <p id="sub" class="sub"></p>
       <dl>
         <div class="row"><dt>今の残高</dt><span class="leader"></span><dd id="r-balance">---</dd></div>
-        <div class="row"><dt>固定費</dt><span class="leader"></span><dd id="r-fixed">---</dd></div>
+        <div class="row"><dt>支払い予定</dt><span class="leader"></span><dd id="r-fixed">---</dd></div>
         <div class="row"><dt>残しておく額</dt><span class="leader"></span><dd id="r-saving">---</dd></div>
         <div class="row total"><dt>使えるお金</dt><span class="leader"></span><dd id="r-usable">---</dd></div>
         <div class="row"><dt>給料日まで</dt><span class="leader"></span><dd id="r-days">---</dd></div>
@@ -267,15 +293,41 @@ function daysBetween(todayY, todayM, todayD, iso) {
   var b = Date.UTC(p[0], p[1] - 1, p[2]);
   return Math.round((b - a) / 86400000);
 }
+function sumItems(items) {
+  var total = 0;
+  (items || []).forEach(function (it) {
+    var n = parseFloat(it && it.amount);
+    if (isFinite(n)) total += n;
+  });
+  return total;
+}
+function normalizeSaved(v) {
+  // Older versions stored one number in "fixed". Turn it into one item.
+  var out = {
+    balance: v.balance,
+    payday: v.payday,
+    saving: v.saving,
+    items: []
+  };
+  if (Array.isArray(v.items)) {
+    out.items = v.items
+      .filter(function (it) { return it && typeof it === 'object'; })
+      .map(function (it) { return { name: String(it.name == null ? '' : it.name), amount: it.amount == null ? '' : it.amount }; });
+  } else if (typeof v.fixed === 'number' && v.fixed > 0) {
+    out.items = [{ name: '固定費', amount: v.fixed }];
+  }
+  return out;
+}
 // CALC-END
 
 // ---- page ----
 (function () {
   var KEY = 'week-budget-v1';
-  var ids = ['balance', 'payday', 'fixed', 'saving'];
-  var el = {};
-  ids.forEach(function (id) { el[id] = document.getElementById(id); });
   var $ = function (id) { return document.getElementById(id); };
+  var elBalance = $('balance');
+  var elPayday = $('payday');
+  var elSaving = $('saving');
+  var elItems = $('items');
 
   function pad(n) { return String(n).padStart(2, '0'); }
   function toISO(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
@@ -284,7 +336,16 @@ function daysBetween(todayY, todayM, todayD, iso) {
   function sampleValues() {
     var d = new Date();
     d.setDate(d.getDate() + 12);
-    return { balance: 52000, payday: toISO(d), fixed: 18000, saving: 5000 };
+    return {
+      balance: 52000,
+      payday: toISO(d),
+      saving: 5000,
+      items: [
+        { name: '家賃', amount: 12000 },
+        { name: 'スマホ代', amount: 4000 },
+        { name: 'サブスク', amount: 2000 }
+      ]
+    };
   }
 
   function load() {
@@ -292,7 +353,7 @@ function daysBetween(todayY, todayM, todayD, iso) {
       var raw = localStorage.getItem(KEY);
       if (raw) {
         var v = JSON.parse(raw);
-        if (v && typeof v === 'object') return { values: v, saved: true };
+        if (v && typeof v === 'object') return { values: normalizeSaved(v), saved: true };
       }
     } catch (e) {}
     return { values: sampleValues(), saved: false };
@@ -304,22 +365,80 @@ function daysBetween(todayY, todayM, todayD, iso) {
     try { localStorage.removeItem(KEY); } catch (e) {}
   }
 
+  var rowCount = 0;
+  function addRow(name, amount, focus) {
+    rowCount += 1;
+    var n = rowCount;
+    var li = document.createElement('li');
+    li.className = 'item';
+
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'item-name';
+    nameInput.id = 'item-name-' + n;
+    nameInput.placeholder = '項目名';
+    nameInput.setAttribute('aria-label', '項目名');
+    nameInput.maxLength = 30;
+    nameInput.value = name == null ? '' : name;
+
+    var amountInput = document.createElement('input');
+    amountInput.type = 'number';
+    amountInput.className = 'item-amount';
+    amountInput.id = 'item-amount-' + n;
+    amountInput.inputMode = 'numeric';
+    amountInput.min = '0';
+    amountInput.step = '1';
+    amountInput.placeholder = '金額';
+    amountInput.setAttribute('aria-label', '金額（円）');
+    amountInput.value = amount == null ? '' : amount;
+
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', 'この項目を削除');
+
+    li.appendChild(nameInput);
+    li.appendChild(amountInput);
+    li.appendChild(remove);
+    elItems.appendChild(li);
+
+    nameInput.addEventListener('input', onInput);
+    amountInput.addEventListener('input', onInput);
+    remove.addEventListener('click', function () {
+      li.remove();
+      onInput();
+    });
+    if (focus) nameInput.focus();
+  }
+
   function setInputs(v) {
-    el.balance.value = v.balance == null ? '' : v.balance;
-    el.payday.value = v.payday || '';
-    el.fixed.value = v.fixed == null ? '' : v.fixed;
-    el.saving.value = v.saving == null ? '' : v.saving;
+    elBalance.value = v.balance == null ? '' : v.balance;
+    elPayday.value = v.payday || '';
+    elSaving.value = v.saving == null ? '' : v.saving;
+    elItems.textContent = '';
+    (v.items || []).forEach(function (it) { addRow(it.name, it.amount, false); });
   }
   function num(input) {
     var n = parseFloat(input.value);
     return isFinite(n) ? n : 0;
   }
+  function readItems() {
+    var list = [];
+    elItems.querySelectorAll('.item').forEach(function (li) {
+      list.push({
+        name: li.querySelector('.item-name').value,
+        amount: li.querySelector('.item-amount').value
+      });
+    });
+    return list;
+  }
   function readInputs() {
     return {
-      balance: num(el.balance),
-      payday: el.payday.value,
-      fixed: num(el.fixed),
-      saving: num(el.saving)
+      balance: num(elBalance),
+      payday: elPayday.value,
+      saving: num(elSaving),
+      items: readItems()
     };
   }
 
@@ -340,12 +459,16 @@ function daysBetween(todayY, todayM, todayD, iso) {
 
   function render() {
     var v = readInputs();
+    var fixed = sumItems(v.items);
+    $('items-total').textContent = yen(fixed);
+    $('items-empty').hidden = v.items.length > 0;
+
     var t = new Date();
     var rows = {
       balance: yen(v.balance),
-      fixed: '-' + yen(v.fixed),
+      fixed: '-' + yen(fixed),
       saving: '-' + yen(v.saving),
-      usable: yen(v.balance - v.fixed - v.saving),
+      usable: yen(v.balance - fixed - v.saving),
       days: '---',
       perday: '---'
     };
@@ -355,7 +478,7 @@ function daysBetween(todayY, todayM, todayD, iso) {
       return;
     }
     var days = daysBetween(t.getFullYear(), t.getMonth() + 1, t.getDate(), v.payday);
-    var r = calcBudget(v.balance, v.fixed, v.saving, days);
+    var r = calcBudget(v.balance, fixed, v.saving, days);
 
     if (r.status === 'payday') {
       rows.days = days === 0 ? '今日' : '過ぎています';
@@ -366,9 +489,9 @@ function daysBetween(todayY, todayM, todayD, iso) {
     }
     rows.days = r.days + '日';
     if (r.status === 'short') {
-      show('-' + yen(r.shortfall).replace('円', '') + '円',
+      show('-' + yen(r.shortfall),
         '給料日までのお金が、この金額ぶん足りません。', rows,
-        '固定費や残しておく額を引くと、使えるお金がマイナスになります。金額を見直してください。', true);
+        '支払い予定や残しておく額を引くと、使えるお金がマイナスになります。金額を見直してください。', true);
       return;
     }
     rows.perday = yen(r.perDay);
@@ -389,7 +512,11 @@ function daysBetween(todayY, todayM, todayD, iso) {
   var init = load();
   setInputs(init.values);
   $('sample').hidden = init.saved;
-  ids.forEach(function (id) { el[id].addEventListener('input', onInput); });
+  [elBalance, elPayday, elSaving].forEach(function (input) { input.addEventListener('input', onInput); });
+  $('add').addEventListener('click', function () {
+    addRow('', '', true);
+    onInput();
+  });
   $('form').addEventListener('submit', function (e) { e.preventDefault(); });
   $('reset').addEventListener('click', function () {
     clearSaved();
